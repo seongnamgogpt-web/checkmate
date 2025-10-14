@@ -1,9 +1,8 @@
 import os
 import streamlit as st
 from utils import extract_text_from_uploaded_file
-import openai
 
-# .env 파일 로드 (옵션)
+# .env 파일 로드
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -14,7 +13,7 @@ except:
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     try:
-        OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY")
+        OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
     except:
         OPENAI_API_KEY = None
 
@@ -22,19 +21,16 @@ st.set_page_config(page_title="Check Mate", page_icon="🧠", layout="wide")
 st.title("Check Mate — 수행평가 초안 검사")
 
 if not OPENAI_API_KEY:
-    st.warning("OPENAI_API_KEY 환경변수가 설정되어 있지 않습니다. .env 또는 Streamlit Secrets에 설정하세요.")
+    st.warning("❗ OPENAI_API_KEY가 설정되지 않았습니다. .env 또는 Streamlit Secrets에서 설정하세요.")
 
-with st.expander("도움말 / 사용법", expanded=True):
+with st.expander("📘 사용법", expanded=True):
     st.markdown("""
-    1. 수행평가 요구조건을 입력하거나 예시를 선택하세요.
-    2. 결과물(텍스트 또는 파일)을 입력하세요.
-    3. '검사 시작'을 누르면 오른쪽에 항목별 검사 보고서가 표시됩니다.
+    1. 수행평가 **요구조건**을 입력하거나 예시를 선택하세요.
+    2. **결과물 텍스트**를 입력하거나 파일로 업로드하세요.
+    3. ✅ '검사 시작'을 누르면 오른쪽에 항목별 체크리스트 보고서가 생성됩니다.
     """)
 
-# -------------------------------
-# ✅ 예시 목록
-# -------------------------------
-
+# ✅ 예시 데이터
 examples = {
     "직접 입력": {
         "requirements": "",
@@ -71,28 +67,24 @@ examples = {
     }
 }
 
-# -------------------------------
-# 좌/우 컬럼 레이아웃
-# -------------------------------
-
+# 🔹 레이아웃 구성
 left_col, right_col = st.columns([1, 1])
 
 with left_col:
-    st.header("입력")
+    st.header("✍️ 입력")
 
-    # ✅ 예시 선택
     selected_example = st.selectbox("예시 선택", list(examples.keys()))
 
     requirements_text = st.text_area(
-        "요구조건 (항목별로 줄바꿈)",
+        "📝 요구조건 (항목별로 줄바꿈)",
         height=200,
         value=examples[selected_example]["requirements"]
     )
 
-    uploaded_file = st.file_uploader("제출물 파일 업로드 (txt, pdf, docx 등)")
+    uploaded_file = st.file_uploader("📎 제출물 파일 업로드 (txt, pdf, docx 등)")
 
     submission_text = st.text_area(
-        "결과물 텍스트",
+        "📄 결과물 텍스트",
         height=300,
         value=examples[selected_example]["submission"]
     )
@@ -104,18 +96,17 @@ with left_col:
     run_check = st.button("검사 시작")
 
 with right_col:
-    st.header("검사 보고서")
+    st.header("📋 검사 보고서")
     report_placeholder = st.empty()
 
-# -------------------------------
-# 🔍 검사 로직
-# -------------------------------
-
+# ✅ AI 검사 함수 (OpenAI 최신 방식 사용)
 def summarize_match(requirements, submission_text, openai_api_key):
-    openai.api_key = openai_api_key
+    from openai import OpenAI
+
+    client = OpenAI(api_key=openai_api_key)
 
     prompt = f"""
-당신은 학생의 글을 평가하는 첨삭 도우미입니다.
+당신은 학생의 글을 평가하는 AI 도우미입니다.
 
 다음은 학생이 작성한 수행평가 결과물입니다:
 
@@ -126,24 +117,26 @@ def summarize_match(requirements, submission_text, openai_api_key):
 요구조건 목록:
 {chr(10).join(f"- {r}" for r in requirements)}
 
-각 요구조건마다 아래 형식에 따라 평가해주세요:
+각 요구조건에 대해 다음과 같은 형식으로 평가해주세요:
 
 형식 예시:
 - ✅ **요구조건**: 충족함 — 간단한 이유 설명
 - ❌ **요구조건**: 부족함 — 부족한 이유 설명
 
-결과를 체크리스트 형태로 작성해주세요.
+각 항목을 체크리스트 형태로 출력해주세요.
 """
 
-    response = openai.ChatCompletion.create(
+    response = client.chat.completions.create(
         model="gpt-4",
-        messages=[{"role": "user", "content": prompt}],
+        messages=[
+            {"role": "user", "content": prompt}
+        ],
         temperature=0.4,
     )
 
     return response.choices[0].message.content.strip()
 
-
+# 🔍 검사 실행
 if run_check:
     if not requirements_text.strip():
         with right_col:
@@ -153,7 +146,10 @@ if run_check:
             st.error("결과물을 입력하거나 파일을 업로드하세요.")
     else:
         requirements = [r.strip() for r in requirements_text.splitlines() if r.strip()]
-        with st.spinner("AI 검사 중..."):
-            report = summarize_match(requirements, submission_text, OPENAI_API_KEY)
-        report_placeholder.markdown(report)
+        with st.spinner("AI 검사 중입니다..."):
+            try:
+                report = summarize_match(requirements, submission_text, OPENAI_API_KEY)
+                report_placeholder.markdown(report)
+            except Exception as e:
+                st.error(f"AI 처리 중 오류가 발생했습니다: {e}")
 
