@@ -2,14 +2,14 @@ import os
 import streamlit as st
 from utils import extract_text_from_uploaded_file
 
-# .env 파일 로드
+# Load environment variables
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except:
     pass
 
-# OpenAI API 키 설정
+# OpenAI API Key 설정
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     try:
@@ -17,20 +17,23 @@ if not OPENAI_API_KEY:
     except:
         OPENAI_API_KEY = None
 
-st.set_page_config(page_title="Check Mate", page_icon="🧠", layout="wide")
-st.title("Check Mate — 수행평가 초안 검사")
+# 페이지 설정
+st.set_page_config(page_title="Check Mate — 수행평가 검사", page_icon="🧠", layout="wide")
+st.markdown("<h1 style='text-align: center;'>🧠 Check Mate — 수행평가 초안 검사 도우미</h1>", unsafe_allow_html=True)
 
+# API 키 확인
 if not OPENAI_API_KEY:
     st.warning("❗ OPENAI_API_KEY가 설정되지 않았습니다. .env 또는 Streamlit Secrets에서 설정하세요.")
 
-with st.expander("📘 사용법", expanded=True):
+# 사용법
+with st.expander("📘 사용법 안내", expanded=True):
     st.markdown("""
-    1. 수행평가 **요구조건**을 입력하거나 예시를 선택하세요.
-    2. **결과물 텍스트**를 입력하거나 파일로 업로드하세요.
-    3. ✅ '검사 시작'을 누르면 오른쪽에 항목별 체크리스트 보고서가 생성됩니다.
+    1. **수행평가 요구조건**을 입력하거나 예시를 선택하세요.  
+    2. **결과물**을 직접 입력하거나 파일로 업로드하세요.  
+    3. ✅ **검사 시작**을 누르면, 오른쪽에 조건별 평가와 피드백이 표시됩니다.
     """)
 
-# ✅ 예시 데이터
+# 예시 입력
 examples = {
     "직접 입력": {
         "requirements": "",
@@ -67,63 +70,62 @@ examples = {
     }
 }
 
-# 🔹 레이아웃 구성
+# 좌/우 컬럼 구성
 left_col, right_col = st.columns([1, 1])
 
 with left_col:
     st.header("✍️ 입력")
 
-    selected_example = st.selectbox("예시 선택", list(examples.keys()))
-
-    requirements_text = st.text_area(
-        "📝 요구조건 (항목별로 줄바꿈)",
-        height=200,
-        value=examples[selected_example]["requirements"]
-    )
-
-    uploaded_file = st.file_uploader("📎 제출물 파일 업로드 (txt, pdf, docx 등)")
-
-    submission_text = st.text_area(
-        "📄 결과물 텍스트",
-        height=300,
-        value=examples[selected_example]["submission"]
-    )
+    selected_example = st.selectbox("📂 예시 선택", list(examples.keys()))
+    requirements_text = st.text_area("📌 요구조건 (줄바꿈으로 구분)", height=180, value=examples[selected_example]["requirements"])
+    uploaded_file = st.file_uploader("📎 제출물 파일 업로드 (txt, pdf, docx)")
+    submission_text = st.text_area("📄 결과물 텍스트", height=250, value=examples[selected_example]["submission"])
 
     if uploaded_file and not submission_text:
         with st.spinner("파일에서 텍스트 추출 중..."):
             submission_text = extract_text_from_uploaded_file(uploaded_file)
 
-    run_check = st.button("검사 시작")
+    run_check = st.button("✅ 검사 시작")
 
 with right_col:
-    st.header("📋 검사 보고서")
+    st.header("📋 검사 결과")
     report_placeholder = st.empty()
 
-# ✅ AI 검사 함수 (OpenAI 최신 방식 사용)
+# AI 평가 함수
 def summarize_match(requirements, submission_text, openai_api_key):
     from openai import OpenAI
-
     client = OpenAI(api_key=openai_api_key)
 
     prompt = f"""
-당신은 학생의 글을 평가하는 AI 도우미입니다.
+너는 수행평가 글을 평가하는 첨삭 전문가입니다.
 
-다음은 학생이 작성한 수행평가 결과물입니다:
+다음은 학생이 작성한 글과 수행평가 요구조건입니다:
 
---- 결과물 ---
+📄 학생의 글:
 {submission_text}
----------------
 
-요구조건 목록:
+📌 요구조건:
 {chr(10).join(f"- {r}" for r in requirements)}
 
-각 요구조건에 대해 다음과 같은 형식으로 평가해주세요:
+---
 
-형식 예시:
-- ✅ **요구조건**: 충족함 — 간단한 이유 설명
-- ❌ **요구조건**: 부족함 — 부족한 이유 설명
+💡 아래 기준으로 각 조건을 평가하세요:
 
-각 항목을 체크리스트 형태로 출력해주세요.
+1. 해당 조건을 충족했는지 (✅ 충족 / ❌ 부족)
+2. 글의 표현이 명확하고 논리적인지
+3. 사실과 맞지 않는 주장이나 정보가 있는지 (명칭 오류, 잘못된 정보 포함)
+4. 용어나 개념이 틀리거나 부정확하게 사용된 부분은 없는지
+5. 개선이 필요한 경우, 어떻게 수정하면 좋을지 조언
+
+---
+
+📝 결과 출력 형식 (Markdown 체크리스트):
+
+- ✅ **[요구조건]**: 충족 — [간단한 이유]
+- ❌ **[요구조건]**: 부족 — [부족한 이유 설명]
+- ⚠️ **사실 오류 또는 용어 오류**: "[문장 또는 용어]" → 올바른 표현 또는 오류 설명
+
+가능한 한 명확하고 객관적인 피드백을 작성하세요.
 """
 
     response = client.chat.completions.create(
@@ -131,25 +133,23 @@ def summarize_match(requirements, submission_text, openai_api_key):
         messages=[
             {"role": "user", "content": prompt}
         ],
-        temperature=0.4,
+        temperature=0.4
     )
 
     return response.choices[0].message.content.strip()
 
-# 🔍 검사 실행
+# 검사 실행
 if run_check:
     if not requirements_text.strip():
-        with right_col:
-            st.error("요구조건을 입력하거나 예시를 선택하세요.")
+        right_col.error("❗ 요구조건을 입력해주세요.")
     elif not submission_text.strip():
-        with right_col:
-            st.error("결과물을 입력하거나 파일을 업로드하세요.")
+        right_col.error("❗ 결과물을 입력하거나 파일을 업로드해주세요.")
     else:
         requirements = [r.strip() for r in requirements_text.splitlines() if r.strip()]
-        with st.spinner("AI 검사 중입니다..."):
+        with st.spinner("AI가 글을 평가 중입니다..."):
             try:
                 report = summarize_match(requirements, submission_text, OPENAI_API_KEY)
                 report_placeholder.markdown(report)
             except Exception as e:
-                st.error(f"AI 처리 중 오류가 발생했습니다: {e}")
+                st.error(f"❌ 오류 발생: {e}")
 
