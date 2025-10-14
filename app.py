@@ -22,8 +22,11 @@ client = OpenAI(api_key=API_KEY)
 # ==============================
 # Streamlit UI
 # ==============================
-st.set_page_config(page_title="Check Mate - 자동 수행평가 첨삭기", layout="wide")
-st.title("🧠 Check Mate - 수행평가 자동 평가 및 첨삭 도우미")
+st.set_page_config(page_title="Check Mate - 수행평가 자동 첨삭기", layout="wide")
+st.title("🧠 Check Mate - 수행평가 자동 평가 및 첨삭")
+
+# 모드 선택: 교사용 / 학생용
+mode = st.radio("모드 선택", ["학생용", "교사용"])
 
 st.markdown("""
 **Check Mate**는 수행평가 초안이 제시된 요구조건에 얼마나 부합하는지 AI가 자동으로 평가하고, 
@@ -42,10 +45,7 @@ left, right = st.columns([1, 1])
 # ==============================
 with left:
     st.header("📋 수행평가 요구조건 입력")
-    conditions = st.text_area(
-        "조건을 한 줄씩 입력하세요:",
-        placeholder="예: 1. 글자 수 800~1200자\n2. 대륙이동설 제안자 언급\n3. 과학적 근거 포함"
-    )
+    conditions = st.text_area("조건을 한 줄씩 입력하세요:", placeholder="예: 1. 글자 수 800~1200자\n2. 대륙이동설 제안자 언급\n3. 과학적 근거 포함")
 
     st.header("📝 학생 제출물 입력")
     text_input_method = st.radio("입력 방식", ["직접 입력", "파일 업로드"])
@@ -67,26 +67,34 @@ with left:
         else:
             with st.spinner("AI가 평가 중입니다..."):
                 prompt = f"""
-                너는 수행평가 전문 AI 채점관이야.
-
-                아래 요구조건과 학생 글을 보고 다음을 수행해:
-                1. 각 조건 충족 여부 판단 (✅ 충족, ❌ 사실 오류 포함 불충족, ⚠️ 일부 부족)
-                2. 사실 오류, 명칭 오류, 개념 오류가 있으면 자동으로 ❌ 처리
-                3. 문법, 표현, 구조 등을 자동 첨삭 (원문 의미 최대한 유지)
-                4. 조건별 평가와 이유, 첨삭 문장 제안 포함
-                5. 최종 점수 및 간략 총평 제공 (100점 만점)
+                너는 수행평가 첨삭 및 채점 전문가 AI야.
+                다음 조건과 학생 글을 보고 체크리스트 형태로 평가하고 첨삭을 제공해.
+                - 사실 오류, 명칭 오류, 개념 오류가 있으면 ❌로 처리
+                - 문법, 표현, 문장 구조 오류는 ⚠️로 표시
+                - 조건 충족 시 ✅
+                - 각 조건별 이유와 첨삭 문장 제안 포함
+                - 최종 점수(100점 만점) 및 간략 총평 작성
 
                 [조건 목록]
                 {conditions}
 
                 [학생 글]
                 {student_text}
+
+                출력 형식:
+                - 조건1: 상태 (✅ / ❌ / ⚠️)
+                  이유: ...
+                  첨삭 제안: ...
+                - 조건2: 상태 ...
+                ...
+                총점: XX점
+                총평: ...
                 """
 
                 response = client.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=[
-                        {"role": "system", "content": "너는 수행평가 채점과 첨삭 전문가 AI야."},
+                        {"role": "system", "content": "너는 수행평가 첨삭 및 채점 전문가 AI야."},
                         {"role": "user", "content": prompt}
                     ],
                     temperature=0.3
