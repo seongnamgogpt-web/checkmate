@@ -1,5 +1,11 @@
-
 # app.py
+"""
+Check Mate - 수행평가 자동 평가 및 첨삭 (개선판)
+- 강화된 명칭/사실 검증 프롬프트 포함
+- UI 단순화 및 체크리스트형 결과 표시
+- 검사 엄격도 3단계, 자동 수정 기능 포함
+"""
+
 import os
 import re
 import json
@@ -9,7 +15,7 @@ from openai import OpenAI
 from utils import extract_text_from_uploaded_file
 
 # ==============================
-# 초기 설정 / API 키
+# 초기 설정
 # ==============================
 try:
     from dotenv import load_dotenv
@@ -25,54 +31,44 @@ if not API_KEY:
 client = OpenAI(api_key=API_KEY)
 
 # ==============================
-# 페이지 설정
+# 페이지 설정 (UI/접근성 고려)
 # ==============================
-st.set_page_config(page_title="Check Mate - 수행평가 자동 첨삭기", layout="wide")
-st.title("🧠 Check Mate - 수행평가 자동 평가 및 첨삭")
-
-# 설명
-st.markdown("""
-**Check Mate**는 학생 제출물(초안)이 교사가 제시한 조건을 얼마나 충족하는지 **체크리스트 형식**으로 평가하고,
-사실성(명칭/개념/사실 오류)까지 검증하여 **자동 첨삭(수정문 제시)**까지 해주는 웹앱입니다.
-
-특징:
-- 검사 수준 선택(1:느슨 / 2:보통 / 3:엄격)
-- 조건별 상태(✅/⚠️/❌), 이유, 첨삭 제안(문장 단위)
-- JSON 출력으로 안정적 파싱 → 체크리스트 UI 제공
-""")
+st.set_page_config(page_title="Check Mate", layout="wide", initial_sidebar_state="expanded")
+st.markdown(
+    """
+    <style>
+      .big-title { font-size:32px; font-weight:700; }
+      .subtle { color: #6c6c6c; }
+      .cond-card { background: #f8f9fa; padding: 12px; border-radius: 8px; }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+st.markdown('<div class="big-title">🧠 Check Mate - 수행평가 자동 평가 및 첨삭</div>', unsafe_allow_html=True)
+st.markdown("수행평가 초안을 **조건 체크리스트**로 자동 평가하고, **명칭/사실 오류**까지 엄격히 검증하여 첨삭안을 제시합니다.", unsafe_allow_html=True)
+st.markdown("---")
 
 # ==============================
-# 유틸 함수들
+# 유틸 함수
 # ==============================
-def _strip_json_from_response(text: str) -> str:
-    """
-    모델이 응답에서 JSON 객체를 포함해 반환했을 때,
-    가장 먼저 등장하는 JSON object/array를 찾아 반환.
-    """
-    # attempt to find {...} or [...] top-level JSON
-    json_like = re.search(r'(\{.*\}|\[.*\])', text, flags=re.DOTALL)
-    if json_like:
-        return json_like.group(0)
-    return text
+def _extract_json_block(text: str):
+    """모델 응답 안에서 JSON 블록(가장 첫번째)을 찾아 반환."""
+    m = re.search(r'(\{[\s\S]*\}|\[[\s\S]*\])', text)
+    return m.group(0) if m else text
 
-def safe_parse_json(text: str):
-    """
-    안전하게 JSON을 파싱 시도. 실패하면 None 반환.
-    """
+def _safe_json_load(text: str):
     try:
         return json.loads(text)
     except Exception:
         try:
-            # 일부러 작은 따옴표로 오는 경우 교정 시도
-            fixed = text.replace("'", '"')
-            return json.loads(fixed)
+            return json.loads(text.replace("'", '"'))
         except Exception:
             return None
 
 @st.cache_data(show_spinner=False)
-def call_evaluation_api(prompt: str, model="gpt-4o-mini", temperature=0.3, max_tokens=1400):
+def call_openai(prompt: str, model="gpt-4o-mini", temperature=0.25, max_tokens=1400):
     """
-    실제 OpenAI API 호출 (캐싱 적용: 동일 입력에 대해 반복 호출 방지)
+    OpenAI 호출 래퍼 (단일 메시지). 동일 프롬프트에 대한 반복 호출은 캐싱됩니다.
     """
     response = client.chat.completions.create(
         model=model,
@@ -85,80 +81,80 @@ def call_evaluation_api(prompt: str, model="gpt-4o-mini", temperature=0.3, max_t
     )
     return response.choices[0].message.content
 
-def build_evaluation_prompt(conditions: str, student_text: str, strictness_level: int, require_json_only=True) -> str:
+def build_eval_prompt(conditions: str, student_text: str, strictness: int) -> str:
     """
-    개선된 프롬프트를 만들고 반환.
-    strictness_level: 1,2,3
-    require_json_only: True이면 모델에게 'JSON만' 출력하도록 강제
+    강화된 평가 프롬프트.
+    핵심 포인트: '명칭/인명/용어' 검증을 엄격히 수행하라.
+    - 학생 글에 등장하는 인물/용어가 실제 역사지식/과학 지식과 다르면 반드시 ❌로 표시하고
+      '정확한 명칭'을 제시하라. (오타/혼동/잘못된 인물명 모두 포함)
+    - 출력은 JSON 하나만 반환.
     """
-    strict_desc = {
-        1: "1단계 (느슨하게): 애매한 경우 관대하게 처리. 가능한 한 ✅을 주되, 명백한 사실 오류만 ❌로 표시.",
+    strict_map = {
+        1: "1단계 (느슨하게): 애매한 부분에는 관대하게 평가. 명백한 사실 오류만 ❌로 표시.",
         2: "2단계 (보통): 일반적인 기준. 사실/명칭 오류는 ❌, 표현/논리 오류는 ⚠️.",
-        3: "3단계 (엄격하게): 엄격한 평가. 사소한 누락·애매함도 ⚠️ 또는 ❌로 처리."
-    }[strictness_level]
+        3: "3단계 (엄격하게): 매우 엄격. 오탈자나 잘못된 인명/용어도 ❌로 처리하고 정확한 정정안을 제시."
+    }
+    strict_text = strict_map.get(strictness, strict_map[2])
 
-    # JSON 스키마 명시: 명확한 파싱을 위해 모델에게 JSON만 출력하게 강제
-    json_schema = {
-        "type": "object",
-        "properties": {
-            "conditions": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "index": {"type": "integer"},
-                        "condition_text": {"type": "string"},
-                        "status": {"type": "string", "enum": ["✅","⚠️","❌"]},
-                        "reason": {"type": "string"},
-                        "suggestion": {"type": "string"}
-                    }
-                }
-            },
-            "score": {"type": "integer"},
-            "summary": {"type": "string"}
-        }
+    # JSON 스키마(명확한 파싱을 위해)
+    schema_example = {
+        "conditions": [
+            {
+                "index": 1,
+                "condition_text": "string",
+                "status": "✅|⚠️|❌",
+                "reason": "string",
+                "suggestion": "string (수정문 또는 문장 예시)"
+            }
+        ],
+        "score": 0,
+        "summary": "short text"
     }
 
     prompt = f"""
-너는 수행평가 첨삭 및 채점 전문가이며 사실 검증 능력이 있다.
-학생의 글이 아래 [조건 목록]에 얼마나 부합하는지, 사실/명칭/개념 오류까지 검사하여 체크리스트 형태로 평가해라.
-평가 기준:
-- 조건 충족: ✅
-- 문법/표현/논리적 부족 또는 부분 충족: ⚠️
-- 사실/명칭/개념 오류 또는 조건 미충족: ❌
+당신은 '수행평가 채점 및 첨삭 전문가'입니다.
+학생 글이 아래 [조건 목록]을 얼마나 충족하는지 평가하되, 특히 **명칭(인물/지명/전문용어)** 검증을 엄격히 수행하세요.
 
-검사 엄격도: {strict_desc}
+- 만약 학생이 어떤 '인물'을 특정했다면 (예: '홈스가 주장했다'),
+  그 인물이 해당 주장/사건의 실제 제안자·관련자가 맞는지 **검증**하세요.
+  - 만약 '홈스'가 잘못된 명칭(오타 또는 다른 인물)이라면, 해당 조건은 ❌로 표시하시오.
+  - 그리고 '정확한 명칭'을 반드시 제시하시오 (예: '베게너').
+  - 오타인지 혼동인지 명확히 구분하여 'reason'에 1문장으로 설명.
 
-출력 요구사항(반드시 따를 것):
-1) **반드시** 아래의 JSON 스키마에 맞춰 **JSON 객체 하나만** 출력하라.
-2) 조건들은 입력 순서대로 'conditions' 배열에 넣고 각 항목은 index(1-based), condition_text, status, reason, suggestion 을 포함하라.
-3) suggestion은 수정된 문장(또는 문장 예시)을 포함하라. (가능하면 실제 교정 문장 제시)
-4) score는 0~100 정수.
-5) summary는 1-3문장 내외의 간단 총평.
+- 사실/개념 오류(예: 과학적 사실, 역사적 사건)도 ❌로 표시하고, 그 이유와 올바른 진술(한 문장)을 'suggestion'에 제시하세요.
 
-JSON 스키마(예시):
-{json.dumps(json_schema, ensure_ascii=False, indent=2)}
+- 문법·표현·논리적 흐름의 문제는 ⚠️로 표기하고, 간단한 문장 교정 예시를 'suggestion'에 제시하세요.
+
+- 조건 충족 시 ✅.
+
+출력 형식(반드시 준수): **JSON 객체 하나만** 출력하세요. 다른 텍스트는 허용되지 않습니다.
+아래 스키마 예시처럼 출력하십시오:
+{json.dumps(schema_example, ensure_ascii=False, indent=2)}
+
+[검사 엄격도 설명] {strict_text}
 
 [조건 목록]
 {conditions}
 
 [학생 글]
 {student_text}
-
-출력: **JSON 하나만** (다른 텍스트 금지).
 """
     return prompt
 
 def build_correction_prompt(conditions: str, original_text: str) -> str:
     """
-    전체 문서 자동 수정 요청 프롬프트. 수정된 전체 문장만 출력하도록 지시.
+    전체 문서 자동 수정 프롬프트
+    - 명칭 오류가 있으면 올바른 명칭으로 교정
+    - 문장 흐름 자연스럽게 정리
+    - 출력은 수정된 전체 글(텍스트)만
     """
     prompt = f"""
-너는 문장 첨삭 전문가야. 아래 학생의 원문을 바탕으로,
-- 조건에 어긋나거나 사실이 틀린 문장은 정확한 사실/명칭으로 바꿔라.
-- 문법, 표현, 논리 흐름도 자연스럽게 다듬어라.
-- 학생의 원래 의도와 톤을 최대한 유지하되, 오류는 바로잡아라.
-- 출력은 '수정된 전체 글' 하나의 텍스트로만 출력하라. (설명 금지)
+당신은 문장 첨삭 전문가입니다.
+아래 원문을 바탕으로 다음을 수행하세요:
+1) 사실/명칭 오류(인물/지명/용어)가 있으면 정확한 명칭으로 바꿉니다.
+2) 문법·표현·논리 흐름을 자연스럽게 다듬습니다.
+3) 학생의 원래 의도와 톤을 유지하세요.
+4) 출력은 '수정된 전체 글' 하나의 텍스트만 (설명 금지).
 
 [조건 목록]
 {conditions}
@@ -169,170 +165,168 @@ def build_correction_prompt(conditions: str, original_text: str) -> str:
     return prompt
 
 # ==============================
-# 레이아웃: 입력(왼쪽) / 결과(오른쪽)
+# UI: 좌측(입력) / 우측(결과)
 # ==============================
-left, right = st.columns([1, 1])
+left, right = st.columns([1, 1.2])
 
 with left:
-    st.header("📋 수행평가 요구조건 입력 (한 줄씩)")
-    conditions_text = st.text_area("조건을 한 줄씩 입력하세요:", value=st.session_state.get("conditions_text", ""), height=140)
-    st.session_state["conditions_text"] = conditions_text
+    st.subheader("1) 요구조건 입력")
+    conditions = st.text_area("조건을 한 줄씩 입력하세요 (예: 1. 글자 수 800~1200자)", value=st.session_state.get("conditions", ""), height=120)
+    st.session_state["conditions"] = conditions
 
-    st.header("⚙️ 검사 수준 선택")
-    strictness_label = st.radio("검사 엄격도", ["1단계 (느슨하게)", "2단계 (보통)", "3단계 (엄격하게)"])
-    strictness_map = {"1단계 (느슨하게)":1, "2단계 (보통)":2, "3단계 (엄격하게)":3}
-    strictness_level = strictness_map[strictness_label]
+    st.subheader("2) 검사 엄격도")
+    strict_choice = st.selectbox("검사 수준을 선택하세요", ["1단계 (느슨하게)", "2단계 (보통)", "3단계 (엄격하게)"], index=1)
+    strict_map = {"1단계 (느슨하게)":1, "2단계 (보통)":2, "3단계 (엄격하게)":3}
+    strictness = strict_map[strict_choice]
 
-    st.header("📝 학생 제출물 입력")
-    input_mode = st.radio("입력 방식", ["직접 입력", "파일 업로드"])
+    st.subheader("3) 학생 제출물")
+    input_mode = st.radio("입력 방식", ["직접 입력", "파일 업로드"], index=0)
     student_text = ""
     if input_mode == "직접 입력":
         student_text = st.text_area("학생 글 입력", value=st.session_state.get("student_text", ""), height=300)
     else:
-        uploaded_file = st.file_uploader("파일 업로드 (.txt, .pdf, .docx)")
-        if uploaded_file is not None:
-            student_text = extract_text_from_uploaded_file(uploaded_file)
-            st.success("✅ 파일 업로드 및 추출 완료")
-            with st.expander("📄 텍스트 미리보기"):
+        uploaded = st.file_uploader("파일 업로드 (.txt, .pdf, .docx)")
+        if uploaded:
+            student_text = extract_text_from_uploaded_file(uploaded)
+            st.success("✅ 파일 업로드/추출 완료")
+            with st.expander("미리보기"):
                 st.write(student_text[:2000])
 
     st.session_state["student_text"] = student_text
 
-    col1, col2 = st.columns([1,1])
-    with col1:
-        eval_btn = st.button("✳️ AI 자동 평가 실행")
-    with col2:
-        clear_btn = st.button("🧹 입력 초기화")
+    st.markdown("")
+    col_a, col_b = st.columns([1,1])
+    with col_a:
+        if st.button("▶ 평가 실행 (AI)"):
+            # 입력 검증
+            if not conditions.strip():
+                st.warning("⚠️ 조건을 입력하세요.")
+            elif not student_text.strip():
+                st.warning("⚠️ 학생 글을 입력하거나 파일을 업로드하세요.")
+            else:
+                # 빌드 및 저장
+                eval_prompt = build_eval_prompt(conditions, student_text, strictness)
+                st.session_state["eval_prompt"] = eval_prompt
 
-    if clear_btn:
-        st.session_state["student_text"] = ""
-        st.session_state["conditions_text"] = ""
-        st.session_state.pop("evaluation_json", None)
-        st.experimental_rerun()
+                # API 호출
+                with st.spinner("AI가 평가 중입니다 — 명칭/사실검증을 엄격히 수행합니다..."):
+                    raw_resp = call_openai(eval_prompt)
+                    # 추출 및 파싱
+                    json_block = _extract_json_block(raw_resp)
+                    parsed = _safe_json_load(json_block)
+                    if parsed is None:
+                        st.error("⚠️ AI 응답을 파싱하지 못했습니다. (원본 응답을 디버그에 남깁니다.)")
+                        st.session_state["eval_raw"] = raw_resp
+                        st.session_state.pop("eval_json", None)
+                    else:
+                        st.success("✅ 평가 완료 — 결과를 오른쪽에서 확인하세요.")
+                        st.session_state["eval_json"] = parsed
+                        st.session_state["eval_raw"] = raw_resp
+                        st.session_state["eval_time"] = time.time()
 
-    # 실행
-    if eval_btn:
-        if not conditions_text.strip():
-            st.warning("⚠️ 조건을 입력해 주세요.")
-        elif not student_text.strip():
-            st.warning("⚠️ 학생 글을 입력하거나 파일을 업로드 해 주세요.")
-        else:
-            # 프롬프트 빌드
-            eval_prompt = build_evaluation_prompt(conditions_text, student_text, strictness_level, require_json_only=True)
-            # 저장해서 UI 하단에 보여줌
-            st.session_state["last_eval_prompt"] = eval_prompt
+    with col_b:
+        if st.button("✖️ 초기화"):
+            for k in ["conditions", "student_text", "eval_json", "eval_raw", "corrected_text", "eval_prompt"]:
+                st.session_state.pop(k, None)
+            st.experimental_rerun()
 
-            with st.spinner("AI가 평가 및 사실검증 중입니다... (잠시만 기다려주세요)"):
-                # 실제 API 호출 (캐시 적용)
-                raw = call_evaluation_api(eval_prompt)
-                # 모델이 JSON을 텍스트 외에도 붙여 반환할 수 있으니 JSON 추출 시도
-                json_part = _strip_json_from_response(raw)
-                parsed = safe_parse_json(json_part)
-
-                if parsed is None:
-                    # 파싱 실패 시 원본 텍스트 함께 저장하고 사용자에게 알림
-                    st.error("⚠️ AI가 보낸 응답을 JSON으로 파싱하지 못했습니다. 아래 '원본 응답'을 확인하세요.")
-                    st.session_state["evaluation_raw"] = raw
-                    st.session_state.pop("evaluation_json", None)
-                else:
-                    st.success("✅ 평가 결과가 준비되었습니다.")
-                    st.session_state["evaluation_json"] = parsed
-                    # store raw for debugging if needed
-                    st.session_state["evaluation_raw"] = raw
-                    # store timestamp
-                    st.session_state["eval_time"] = time.time()
+    # 간단 도움말 / 접근성
+    st.markdown("---")
+    st.markdown("도움: 검사 엄격도를 높일수록 인물명·용어의 정확성에 더 엄격하게 체크합니다. 오타·혼동으로 인한 잘못된 명칭은 ❌로 표시됩니다.")
+    st.markdown("접근성: 텍스트 크기는 브라우저 줌으로 쉽게 확대하세요. 필요한 경우 TTS(음성 읽기) 추가 연동 가능.")
 
 with right:
-    st.header("📊 평가 결과 (체크리스트 형식)")
-    if "evaluation_json" not in st.session_state:
-        st.info("왼쪽에서 조건과 학생 글 입력 후 'AI 자동 평가 실행'을 눌러주세요.")
+    st.subheader("평가 결과 (체크리스트)")
+    if "eval_json" not in st.session_state:
+        st.info("왼쪽에서 평가를 실행하면 결과가 여기에 체크리스트 형식으로 표시됩니다.")
     else:
-        eval_json = st.session_state["evaluation_json"]
-
-        # Score & Summary
-        score = eval_json.get("score", None)
-        summary = eval_json.get("summary", "")
-
+        res = st.session_state["eval_json"]
+        # Score / summary
+        score = res.get("score", None)
+        summary = res.get("summary", "")
         if score is not None:
-            st.metric(label="총점 (100점 만점)", value=f"{score} 점")
-        st.write(summary)
+            st.metric("총점 (100점 만점)", f"{score} 점")
+        if summary:
+            st.markdown(f"**총평:** {summary}")
 
-        st.markdown("---")
-        st.subheader("🔎 조건별 상세 체크리스트")
+        st.markdown("")
+        st.markdown("### 조건별 체크리스트")
+        st.markdown("각 항목을 펼쳐 이유와 AI의 수정 제안을 확인하세요. (녹:충족 / 황:부분 / 적:불충족)")
 
-        conditions = eval_json.get("conditions", [])
-        # 렌더링: index | 상태(아이콘) | 조건 텍스트 | 이유 | 제안 | 적용 버튼
-        for cond in conditions:
-            idx = cond.get("index")
-            cond_text = cond.get("condition_text", "")
-            status = cond.get("status", "")
-            reason = cond.get("reason", "")
-            suggestion = cond.get("suggestion", "")
+        conditions_list = res.get("conditions", [])
+        # 시각적으로 보기 좋게 표시
+        for item in conditions_list:
+            idx = item.get("index", "")
+            cond_text = item.get("condition_text", "")
+            status = item.get("status", "")
+            reason = item.get("reason", "")
+            suggestion = item.get("suggestion", "")
 
-            status_icon = {"✅":"🟢 ✅", "⚠️":"🟡 ⚠️", "❌":"🔴 ❌"}.get(status, status)
-            st.markdown(f"**{idx}. {cond_text}**  —  {status_icon}")
-            with st.expander(f"세부: 이유 / 첨삭 제안 (조건 {idx})"):
-                st.markdown(f"- **이유:** {reason}")
-                st.markdown(f"- **첨삭 제안:** {suggestion if suggestion else '없음'}")
-                # 개별 적용 버튼: suggestion이 있으면 원문에 반영하여 미리보기 제공
+            # 카드 스타일: color by status
+            if status == "✅":
+                header = f"🟢 {idx}. {cond_text}"
+            elif status == "⚠️":
+                header = f"🟡 {idx}. {cond_text}"
+            else:
+                header = f"🔴 {idx}. {cond_text}"
+
+            st.markdown(f"**{header}**")
+            with st.expander("세부 보기: 이유 및 첨삭 제안"):
+                st.markdown(f"- **상태:** {status}")
+                st.markdown(f"- **이유:** {reason if reason else '없음'}")
+                st.markdown(f"- **첨삭 제안 (수정 문장 예시):**")
                 if suggestion:
-                    if st.button(f"➕ 제안 적용: 조건 {idx}의 수정문으로 대체", key=f"apply_{idx}"):
-                        # 간단히: 원문 끝에 suggestion을 붙이는 방식 (복잡한 원문 위치 대체는 향후 확장)
-                        new_text = st.session_state.get("student_text", "") + "\n\n" + f"/* 수정(조건 {idx}) */\n{suggestion}"
+                    st.code(suggestion, language="text")
+                else:
+                    st.markdown("`(제안 없음)`")
+
+                # 개별 적용: 제안이 있을 때만 활성화
+                if suggestion:
+                    apply_key = f"apply_{idx}"
+                    if st.button(f"▶ 이 제안 적용 (조건 {idx})", key=apply_key):
+                        # 간단 적용: 원문 말미에 주석 형태로 덧붙이는 임시 적용 방식
+                        current = st.session_state.get("student_text", "")
+                        new_text = current + f"\n\n/* 자동 적용: 조건 {idx} 제안 */\n{suggestion}"
                         st.session_state["student_text"] = new_text
-                        st.success(f"조건 {idx}의 제안이 학생 글에 임시 적용되었습니다. 좌측의 입력창에서 확인하세요.")
+                        st.success("✅ 제안이 학생 글에 임시 적용되었습니다. (좌측 입력창에서 확인 가능)")
+
             st.markdown("---")
 
-        # 자동 전체 수정(Apply All Corrections)
-        st.subheader("✏️ 자동 수정 옵션")
-        if st.button("🔧 모든 제안 자동 적용(새 수정본 생성)"):
-            # Build correction prompt using stored conditions and original text
-            correction_prompt = build_correction_prompt(st.session_state["conditions_text"], st.session_state["student_text"])
-            with st.spinner("AI가 전체 문서를 기반으로 수정본을 생성 중입니다..."):
-                corrected_raw = call_evaluation_api(correction_prompt)
-                # 모델에게 "설명금지, 수정된 전체 글만"을 지시했으므로 보통 텍스트가 반환됨.
-                # 단, call_evaluation_api 캐시 때문에 동일입력 반복시 캐싱 가능.
-                corrected_text = corrected_raw.strip()
+        # 전체 자동 적용(수정본 생성)
+        st.markdown("")
+        st.markdown("### 자동 수정 (전체 적용)")
+        if st.button("🔧 자동으로 전체 수정본 생성"):
+            # Build correction prompt
+            corr_prompt = build_correction_prompt(st.session_state.get("conditions", ""), st.session_state.get("student_text", ""))
+            with st.spinner("AI가 전체 문서를 기반으로 수정본을 생성합니다..."):
+                corr_raw = call_openai(corr_prompt)
+                # 모델은 텍스트만 반환하도록 지시했으므로 그대로 사용
+                corrected = corr_raw.strip()
+                st.session_state["corrected_text"] = corrected
+                st.success("✅ 수정본 생성 완료")
+                st.text_area("✏️ 자동 수정된 전체 글", value=corrected, height=300)
+                st.download_button("💾 수정본 다운로드", corrected, file_name="corrected_text.txt")
 
-                # 안전성: 만약 모델이 JSON을 반환한 경우, 그냥 원본 텍스트로 처리
-                # 저장 및 표시
-                st.session_state["corrected_text"] = corrected_text
-                st.success("✅ 자동 수정본이 생성되었습니다.")
-                st.text_area("✏️ 자동 수정된 전체 글", value=corrected_text, height=300)
-                st.download_button("💾 수정된 글 다운로드", corrected_text, file_name="corrected_text.txt")
-
-        # raw 응답(디버그용)
-        if st.expander("🔬 원본 AI 응답(디버그)"):
-            st.write(st.session_state.get("evaluation_raw", "없음"))
+        # 디버그: 원본 응답(숨김형)
+        if st.checkbox("디버그: 원본 AI 응답 보기"):
+            st.markdown("**원본 AI 응답(파싱 전)**")
+            st.write(st.session_state.get("eval_raw", "(없음)"))
 
 # ==============================
-# 하단: 프롬프트 공개 및 예시
+# 하단: 운영/비용/스케일 권장 사항
 # ==============================
 st.markdown("---")
-st.header("🧾 내부 프롬프트 (AI에게 전달되는 실제 프롬프트 — 검토용)")
-if "last_eval_prompt" in st.session_state:
-    with st.expander("프롬프트 펼치기"):
-        st.code(st.session_state["last_eval_prompt"], language="text")
-else:
-    st.info("평가를 실행하면 여기에 사용된 프롬프트가 표시됩니다.")
+st.header("운영 고려사항 (권장)")
+st.markdown(
+    """
+- 대규모 트래픽(수십만~100만 사용자)을 목표로 한다면 Streamlit 단독 운용 대신:
+  - 요청 큐(예: Redis + 작업 큐) + 비동기 백엔드(FastAPI 등)로 OpenAI 호출을 분리할 것을 권장합니다.
+  - 캐시 정책(동일 입력 재사용), 로컬 사전검사(키워드/문법 기반)와 AI 검사를 결합해 비용을 절감하세요.
+- 개인정보: 학생 제출물은 민감할 수 있으니 익명화·암호화 저장과 명확한 동의 절차 필요.
+"""
+)
 
-st.header("🧩 평가 예시 (미리보기)")
-with st.expander("예시 1"):
-    st.markdown("""
-**조건**
-1. 글자 수 800~1200자  
-2. 대륙이동설 제안자 언급  
-3. 과학적 근거 포함
+# ==============================
+# 끝
+# ==============================
 
-**학생 글**
-베게너는 대륙이 이동한다고 주장했다. 후에 해령과 판 구조론으로 증명되었다.
-""")
-with st.expander("예시 2"):
-    st.markdown("""
-**조건**
-1. 세종대왕 업적 2가지 이상 언급  
-2. 사회적 의미 서술
-
-**학생 글**
-세종대왕은 훈민정음을 창제하고 측우기를 만들었다.
-""")
